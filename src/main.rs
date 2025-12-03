@@ -2,29 +2,59 @@ use std::sync::{Arc, Mutex};
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
 
+struct Backend{
+    addr : String,
+    is_healthy: bool
+
+}
+
 struct LoadBalancer {
-    // List of backend servers (e.g., "127.0.0.1:8081")
-    backends: Vec<String>,
+    backends: Mutex<Vec<Backend>>,
     // Current index to support Round Robin selection
     current_index: Mutex<usize>,
 }
 
 impl LoadBalancer {
-    fn new(backends: Vec<String>) -> Self {
+    fn new(addrs: Vec<String>) -> Self {
+        let backends = addrs
+        .into_iter()
+        .map(|addr| Backend {
+            addr,
+            is_healthy : true,
+        })
+        .collect();
+
         LoadBalancer {
-            backends,
+            backends:Mutex::new(backends),
             current_index: Mutex::new(0),
         }
     }
 
     // Round Robin selection logic
-    fn next_backend(&self) -> String {
+    fn next_backend(&self) -> Option<String> {
+        let mut backends = self.backends.lock().unwrap();
         let mut idx = self.current_index.lock().unwrap();
-        let backend = self.backends[*idx].clone();
-        
-        // Increment and wrap around
-        *idx = (*idx + 1) % self.backends.len();
-        backend
+        let pool_size = backends.len();
+        for _ in 0..pool_size{
+            *idx = (*idx +1)%pool_size;
+            if backends[*idx].is_healthy {
+                return Some(backends[*idx].addr.clone());
+            }
+        }
+        None
+    
+    }
+    fn set_health(&self,index:usize,healthy:bool){
+        let mut backends = self.backends.lock().unwrap();
+        if backends[index].is_healthy !=healthy{
+            if healthy{
+
+                println!("Server {} is back UP",backends[index].addr)
+            }else{
+                println!("Server {} is DOWN",backends[index].addr)
+            }
+            backends[index].is_healthy = healthy;
+        }
     }
 }
 

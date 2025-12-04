@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
-use tokio::io;
+use std::time::Duration;
+use tokio::{io, time};
 use tokio::net::{TcpListener, TcpStream};
 
 struct Backend{
@@ -58,48 +59,69 @@ impl LoadBalancer {
     }
 }
 
+async fn health_checker(lb:Arc<LoadBalancer>){
+    loop {
+        time::sleep(Duration::from_secs(3)).await;
+        let num_backends = lb.backends.lock().unwrap().len();
+        for i in 0..num_backends{
+            let addr = lb.backends.lock().unwrap()[i].addr.clone();
+            let is_alive = match time::timeout(Duration::from_secs(1), TcpStream::connect(&addr)).await{
+                Ok(Ok(_))=>true,
+                _=>false,
+            };
+            lb.set_health(i,is_alive);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    // 1. Define the ports we want to load balance between
-    // We will assume you have servers running on 8081 and 8082
+
     let backend_addrs = vec![
         "127.0.0.1:9001".to_string(),
         "127.0.0.1:9002".to_string(),
         "127.0.0.1:9003".to_string(),
     ];
 
-    // 2. Initialize the Load Balancer shared state
     let lb = Arc::new(LoadBalancer::new(backend_addrs));
+    let lb_monitor = lb.clone();
+    tokio::spawn(async move{
+        health_checker(lb_monitor).await;
+    });
 
-    // 3. Listen on localhost:8080
     let listener_addr = "127.0.0.1:8080";
     let listener = TcpListener::bind(listener_addr).await?;
-    println!("Load Balancer listening on {}...", listener_addr);
+    println!("Load Balancer with health check listening on {}...", listener_addr);
 
     loop {
-        // 4. Accept incoming client connection
         let (mut client_socket, client_addr) = listener.accept().await?;
         println!("Accepted connection from: {}", client_addr);
-
         let lb_clone = lb.clone();
 
-        // 5. Spawn a lightweight async task for this connection
+        
+
         tokio::spawn(async move {
             // Select the next backend server
-            let backend_addr = lb_clone.next_backend();
-            println!("Forwarding {} to backend: {}", client_addr, backend_addr);
-
-            // Attempt to connect to the backend
-            match TcpStream::connect(&backend_addr).await {
-                Ok(mut server_socket) => {
-                    // 6. Proxy data bidirectionally (Client <-> LB <-> Backend)
-                    // copy_bidirectional handles reading/writing efficiently
-                    let _ = io::copy_bidirectional(&mut client_socket, &mut server_socket).await;
-                }
-                Err(e) => {
-                    eprintln!("Failed to connect to backend {}: {}", backend_addr, e);
-                }
+            match lb_clone.next_backend(){
+                Some(backend_addr)=>{
+                    println!("Forwarding {} -> {}", client_addr, backend_addr);
+                    match TcpStream::connect(&backend_addr).await {
+                    Ok(mut server_socket) => {
+                        // Proxy data bidirectionally (Client <-> LB <-> Backend)
+                        let _ = io::copy_bidirectional(&mut client_socket, &mut server_socket).await;
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to connect to backend {}: {}", backend_addr, e);
+                    }
             }
+                }
+                None=>{
+                    eprint!("WARNING: All Backends are down! Dropping connection from {}",client_addr)
+                }
+
+            };
+
+            
         });
     }
 }

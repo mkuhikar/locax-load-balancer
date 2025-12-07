@@ -1,8 +1,10 @@
+use std::io::BufReader;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use serde::Deserialize;
 use tokio::{io, time};
 use tokio::net::{TcpListener, TcpStream};
-
+use std::fs::File;
 struct Backend{
     addr : String,
     is_healthy: bool
@@ -13,6 +15,12 @@ struct LoadBalancer {
     backends: Mutex<Vec<Backend>>,
     // Current index to support Round Robin selection
     current_index: Mutex<usize>,
+}
+#[derive(Debug,Deserialize)]
+struct UpstreamConfig {
+    ip: String,
+    port: u16
+
 }
 
 impl LoadBalancer {
@@ -33,7 +41,7 @@ impl LoadBalancer {
 
     // Round Robin selection logic
     fn next_backend(&self) -> Option<String> {
-        let mut backends = self.backends.lock().unwrap();
+        let backends = self.backends.lock().unwrap();
         let mut idx = self.current_index.lock().unwrap();
         let pool_size = backends.len();
         for _ in 0..pool_size{
@@ -76,12 +84,18 @@ async fn health_checker(lb:Arc<LoadBalancer>){
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    let file = File::open("upstream.json").expect("Failed to open upstream.json");
+    let reader = BufReader::new(file);
+    let configs:Vec<UpstreamConfig> = serde_json::from_reader(reader).expect("Failed to parse JSON");
 
-    let backend_addrs = vec![
-        "127.0.0.1:9001".to_string(),
-        "127.0.0.1:9002".to_string(),
-        "127.0.0.1:9003".to_string(),
-    ];
+
+    let backend_addrs:Vec<String> = configs.into_iter().map(|c| format!("{}:{}",c.ip,c.port)).collect();
+    if backend_addrs.is_empty() {
+        eprintln!("Error: No upstream servers found in upstream.json");
+        return Ok(());
+    }
+
+    println!("Loaded backends: {:?}", backend_addrs);
 
     let lb = Arc::new(LoadBalancer::new(backend_addrs));
     let lb_monitor = lb.clone();
